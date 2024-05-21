@@ -40,7 +40,7 @@ class Cuenta(BaseModel):
     cuenta: int
 
 class Pago(BaseModel):
-    id: int
+    id: Optional[int] = None
     cliente_id: int
     cuenta_id: int
     numero_factura: str

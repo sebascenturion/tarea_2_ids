@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Union
+from typing import List, Optional, Union
 from models.modelsBase import Cliente, Cuenta, Pago, init_db
 import sqlite3
 
@@ -227,3 +227,138 @@ def delete_cuenta(cuenta_id: int):
 # - GET /pagos/{pk} 
 # - PUT /pagos/{pk}
 # - DELETE /pagos/{pk}
+
+def check_cliente_exists(cliente_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+def check_cuenta_exists(cuenta_id: int, cliente_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM cuentas WHERE id = ? AND cliente_id = ?", (cuenta_id, cliente_id))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+def check_factura_exists(numero_factura: str, exclude_id: Optional[int] = None):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    if exclude_id:
+        cursor.execute("SELECT id FROM pagos WHERE numero_factura = ? AND id != ?", (numero_factura, exclude_id))
+    else:
+        cursor.execute("SELECT id FROM pagos WHERE numero_factura = ?", (numero_factura,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+def check_cuenta_belongs_to_cliente(cuenta_id: int, cliente_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM cuentas WHERE id = ? AND cliente_id = ?", (cuenta_id, cliente_id))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+@app.post("/pagos/", response_model=Pago)
+def create_pago(pago: Pago):
+    if not check_cliente_exists(pago.cliente_id):
+        raise HTTPException(status_code=400, detail="Cliente no registrado")
+    
+    if not check_cuenta_belongs_to_cliente(pago.cuenta_id, pago.cliente_id):
+        raise HTTPException(status_code=400, detail="La cuenta especificada no pertenece al cliente")
+
+    if check_factura_exists(pago.numero_factura):
+        raise HTTPException(status_code=400, detail="La factura ya ha sido pagada")
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO pagos (cliente_id, cuenta_id, numero_factura, monto, moneda)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (pago.cliente_id, pago.cuenta_id, pago.numero_factura, pago.monto, pago.moneda))
+    conn.commit()
+    pago.id = cursor.lastrowid
+    conn.close()
+    return pago
+
+@app.get("/pagos/", response_model=List[Pago])
+def read_pagos(skip: int = 0, limit: int = 10):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, cliente_id, cuenta_id, numero_factura, monto, moneda
+        FROM pagos
+        LIMIT ? OFFSET ?
+    ''', (limit, skip))
+    rows = cursor.fetchall()
+    conn.close()
+    return [Pago(id=row[0], cliente_id=row[1], cuenta_id=row[2], numero_factura=row[3], monto=row[4], moneda=row[5]) for row in rows]
+
+@app.get("/pagos/{pago_id}", response_model=Pago)
+def read_pago(pago_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, cliente_id, cuenta_id, numero_factura, monto, moneda
+        FROM pagos
+        WHERE id = ?
+    ''', (pago_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    return Pago(id=row[0], cliente_id=row[1], cuenta_id=row[2], numero_factura=row[3], monto=row[4], moneda=row[5])
+
+@app.put("/pagos/{pago_id}", response_model=Pago)
+def update_pago(pago_id: int, pago: Pago):
+    if not check_cliente_exists(pago.cliente_id):
+        raise HTTPException(status_code=400, detail="Cliente no registrado")
+    
+    if not check_cuenta_belongs_to_cliente(pago.cuenta_id, pago.cliente_id):
+        raise HTTPException(status_code=400, detail="La cuenta especificada no pertenece al cliente")
+
+    if check_factura_exists(pago.numero_factura, exclude_id=pago_id):
+        raise HTTPException(status_code=400, detail="La factura ya ha sido pagada")
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE pagos
+        SET cliente_id = ?, cuenta_id = ?, numero_factura = ?, monto = ?, moneda = ?
+        WHERE id = ?
+    ''', (pago.cliente_id, pago.cuenta_id, pago.numero_factura, pago.monto, pago.moneda, pago_id))
+    conn.commit()
+    conn.close()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    return pago
+
+@app.delete("/pagos/{pago_id}")
+def delete_pago(pago_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        DELETE FROM pagos
+        WHERE id = ?
+    ''', (pago_id,))
+    conn.commit()
+    conn.close()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    return {"message": "Pago eliminado"}
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        DELETE FROM pagos
+        WHERE id = ?
+    ''', (pago_id,))
+    conn.commit()
+    conn.close()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    return {"message": "Pago eliminado"}
