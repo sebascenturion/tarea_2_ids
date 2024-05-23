@@ -1,9 +1,72 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Union
-from models.modelsBase import Cliente, Cuenta, Pago, init_db
+from typing import List
+from models.modelsBase import Cliente, Cuenta, Pago, User, init_db
 import sqlite3
+from jwt_utils import generate_token
+from auth_middleware import JWTBearer
 
+
+def check_unique_account_number(cuenta: int, exclude_id: int = None) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    query = "SELECT COUNT(*) FROM cuentas WHERE cuenta = ?"
+    params = [cuenta]
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    cursor.execute(query, params)
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count == 0
+
+# Función para verificar si un cliente existe
+def check_existing_client(cliente_id: int) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COUNT(*)
+        FROM clientes
+        WHERE id = ?
+    ''', (cliente_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+# Función para verificar si una factura ya existe
+def check_factura_exists(numero_factura: str, exclude_id: int = None) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    query = "SELECT COUNT(*) FROM pagos WHERE numero_factura = ?"
+    params = [numero_factura]
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    cursor.execute(query, params)
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+# Función para verificar si una cuenta pertenece a un cliente
+def check_cuenta_belongs_to_cliente(cuenta_id: int, cliente_id: int) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COUNT(*)
+        FROM cuentas
+        WHERE id = ? AND cliente_id = ?
+    ''', (cuenta_id, cliente_id))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def check_cliente_exists(cliente_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
 
 
 app = FastAPI()
@@ -12,17 +75,22 @@ app = FastAPI()
 DATABASE = "bancobase.db"
 init_db(DATABASE)
 
+# Modelos
+class User(BaseModel):
+    username: str
+    password: str
 
-#TODO Recursos a implementar
-# 1 - Cliente
-# Registrar - POST /clientes
-# listar - GET /clientes
-# consultar- GET /clientes/{pk} 
-# actualizar- PUT /clientes/{pk}
-# eliminar - DELETE /clientes/{pk}
+# Endpoint de autenticación
+@app.post("/login")
+def login(user: User):
+    if user.username == "admin" and user.password == "secret":
+        token = generate_token(user_id=1)  # Simulamos que el usuario tiene ID 1
+        return {"token": token}
+    raise HTTPException(status_code=401, detail="Usuario o contraseña incorrecta")
 
+# Clientes
 @app.post("/clientes/", response_model=Cliente)
-def create_cliente(cliente: Cliente):
+def create_cliente(cliente: Cliente, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     try:
@@ -39,7 +107,7 @@ def create_cliente(cliente: Cliente):
     return cliente
 
 @app.get("/clientes/", response_model=List[Cliente])
-def read_clientes(skip: int = 0, limit: int = 10):
+def read_clientes(skip: int = 0, limit: int = 10, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -52,7 +120,7 @@ def read_clientes(skip: int = 0, limit: int = 10):
     return [Cliente(id=row[0], cedula=row[1], nombre=row[2], apellido=row[3]) for row in rows]
 
 @app.get("/clientes/{cliente_id}", response_model=Cliente)
-def read_cliente(cliente_id: int):
+def read_cliente(cliente_id: int, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -63,11 +131,11 @@ def read_cliente(cliente_id: int):
     row = cursor.fetchone()
     conn.close()
     if row is None:
-        raise HTTPException(status_code=404, detail="Cliente not found")
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
     return Cliente(id=row[0], cedula=row[1], nombre=row[2], apellido=row[3])
 
 @app.put("/clientes/{cliente_id}", response_model=Cliente)
-def update_cliente(cliente_id: int, cliente: Cliente):
+def update_cliente(cliente_id: int, cliente: Cliente, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -79,11 +147,11 @@ def update_cliente(cliente_id: int, cliente: Cliente):
     conn.close()
     cliente.id = cliente_id
     if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Cliente not found")
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
     return cliente
 
 @app.delete("/clientes/{cliente_id}")
-def delete_cliente(cliente_id: int):
+def delete_cliente(cliente_id: int, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -93,45 +161,12 @@ def delete_cliente(cliente_id: int):
     conn.commit()
     conn.close()
     if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Cliente not found")
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
     return {"message": "Cliente deleted"}
 
-# 2 - Cuenta 
-# - POST /cuentas
-# - GET /cuentas
-# - GET /cuentas/{pk} 
-# - PUT /cuentas/{pk}
-# - DELETE /cuentas/{pk}
-# Función para verificar si un número de cuenta ya existe, excluyendo un ID específico
-def check_unique_account_number(cuenta: int, exclude_id: int = None):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    query = "SELECT COUNT(*) FROM cuentas WHERE cuenta = ?"
-    params = [cuenta]
-    if exclude_id is not None:
-        query += " AND id != ?"
-        params.append(exclude_id)
-    cursor.execute(query, params)
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count == 0
-
-
-# Función para verificar si un cliente existe
-def check_existing_client(cliente_id: int):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COUNT(*)
-        FROM clientes
-        WHERE id = ?
-    ''', (cliente_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count > 0
-
+# Cuentas
 @app.post("/cuentas/", response_model=Cuenta)
-def create_cuenta(cuenta: Cuenta):
+def create_cuenta(cuenta: Cuenta, user_id: int = Depends(JWTBearer())):
     if not cuenta.cuenta:
         raise HTTPException(status_code=400, detail="El número de cuenta es requerido")
     if not check_unique_account_number(cuenta.cuenta):
@@ -155,7 +190,7 @@ def create_cuenta(cuenta: Cuenta):
     return cuenta
 
 @app.get("/cuentas/", response_model=List[Cuenta])
-def read_cuentas(skip: int = 0, limit: int = 10):
+def read_cuentas(skip: int = 0, limit: int = 10, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -168,7 +203,7 @@ def read_cuentas(skip: int = 0, limit: int = 10):
     return [Cuenta(id=row[0], cliente_id=row[1], cuenta=row[2]) for row in rows]
 
 @app.get("/cuentas/{cuenta_id}", response_model=Cuenta)
-def read_cuenta(cuenta_id: int):
+def read_cuenta(cuenta_id: int, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -183,7 +218,7 @@ def read_cuenta(cuenta_id: int):
     return Cuenta(id=row[0], cliente_id=row[1], cuenta=row[2])
 
 @app.put("/cuentas/{cuenta_id}", response_model=Cuenta)
-def update_cuenta(cuenta_id: int, cuenta: Cuenta):
+def update_cuenta(cuenta_id: int, cuenta: Cuenta, user_id: int = Depends(JWTBearer())):
     if not cuenta.cuenta:
         raise HTTPException(status_code=400, detail="El número de cuenta es requerido")
     if not check_unique_account_number(cuenta.cuenta, exclude_id=cuenta_id):
@@ -206,7 +241,7 @@ def update_cuenta(cuenta_id: int, cuenta: Cuenta):
     return cuenta
 
 @app.delete("/cuentas/{cuenta_id}")
-def delete_cuenta(cuenta_id: int):
+def delete_cuenta(cuenta_id: int, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -219,52 +254,9 @@ def delete_cuenta(cuenta_id: int):
         raise HTTPException(status_code=404, detail="Cuenta no encontrada")
     return {"message": "Cuenta eliminada"}
 
-
-
-# 3 - Pago 
-# - POST /pagos
-# - GET /pagos
-# - GET /pagos/{pk} 
-# - PUT /pagos/{pk}
-# - DELETE /pagos/{pk}
-
-def check_cliente_exists(cliente_id: int):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-def check_cuenta_exists(cuenta_id: int, cliente_id: int):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM cuentas WHERE id = ? AND cliente_id = ?", (cuenta_id, cliente_id))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-def check_factura_exists(numero_factura: str, exclude_id: Optional[int] = None):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    if exclude_id:
-        cursor.execute("SELECT id FROM pagos WHERE numero_factura = ? AND id != ?", (numero_factura, exclude_id))
-    else:
-        cursor.execute("SELECT id FROM pagos WHERE numero_factura = ?", (numero_factura,))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-def check_cuenta_belongs_to_cliente(cuenta_id: int, cliente_id: int):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM cuentas WHERE id = ? AND cliente_id = ?", (cuenta_id, cliente_id))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count > 0
-
+# Pagos
 @app.post("/pagos/", response_model=Pago)
-def create_pago(pago: Pago):
+def create_pago(pago: Pago, user_id: int = Depends(JWTBearer())):
     if not check_cliente_exists(pago.cliente_id):
         raise HTTPException(status_code=400, detail="Cliente no registrado")
     
@@ -286,7 +278,7 @@ def create_pago(pago: Pago):
     return pago
 
 @app.get("/pagos/", response_model=List[Pago])
-def read_pagos(skip: int = 0, limit: int = 10):
+def read_pagos(skip: int = 0, limit: int = 10, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -299,7 +291,7 @@ def read_pagos(skip: int = 0, limit: int = 10):
     return [Pago(id=row[0], cliente_id=row[1], cuenta_id=row[2], numero_factura=row[3], monto=row[4], moneda=row[5]) for row in rows]
 
 @app.get("/pagos/{pago_id}", response_model=Pago)
-def read_pago(pago_id: int):
+def read_pago(pago_id: int, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -314,7 +306,7 @@ def read_pago(pago_id: int):
     return Pago(id=row[0], cliente_id=row[1], cuenta_id=row[2], numero_factura=row[3], monto=row[4], moneda=row[5])
 
 @app.put("/pagos/{pago_id}", response_model=Pago)
-def update_pago(pago_id: int, pago: Pago):
+def update_pago(pago_id: int, pago: Pago, user_id: int = Depends(JWTBearer())):
     if not check_cliente_exists(pago.cliente_id):
         raise HTTPException(status_code=400, detail="Cliente no registrado")
     
@@ -338,19 +330,7 @@ def update_pago(pago_id: int, pago: Pago):
     return pago
 
 @app.delete("/pagos/{pago_id}")
-def delete_pago(pago_id: int):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        DELETE FROM pagos
-        WHERE id = ?
-    ''', (pago_id,))
-    conn.commit()
-    conn.close()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Pago no encontrado")
-    return {"message": "Pago eliminado"}
-
+def delete_pago(pago_id: int, user_id: int = Depends(JWTBearer())):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute('''

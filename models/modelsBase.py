@@ -46,3 +46,7 @@ class Pago(BaseModel):
     numero_factura: str
     monto: float
     moneda: str
+
+class User(BaseModel):
+    username: str
+    password: str
